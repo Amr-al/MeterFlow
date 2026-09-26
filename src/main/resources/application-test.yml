@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/meterflow_test
+    username: meterflow
+    password: ${DB_PASSWORD:postgres123}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+  flyway:
+    enabled: true
+    clean-disabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
