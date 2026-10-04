@@ -6,13 +6,17 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -26,14 +30,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     }
 
     @ExceptionHandler(MeterFlowException.class)
-    public ResponseEntity<ProblemDetail> handleMeterFlowException(
-            MeterFlowException ex) {
-
-        log.warn(
-                "MeterFlowException: errorCode={}, message={}",
-                ex.getErrorCode().name(),
-                ex.getMessage()
-        );
+    public ResponseEntity<ProblemDetail> handleMeterFlowException(MeterFlowException ex) {
+        log.warn("MeterFlowException: errorCode={}, message={}", ex.getErrorCode().name(), ex.getMessage());
 
         ProblemDetail problemDetail = problemDetail(
                 ex.getErrorCode().getStatus(),
@@ -41,32 +39,23 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 ex.getErrorCode().name()
         );
 
-        return ResponseEntity
-                .status(ex.getErrorCode().getStatus())
-                .body(problemDetail);
+        return ResponseEntity.status(ex.getErrorCode().getStatus()).body(problemDetail);
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ProblemDetail> handleGeneral(Exception ex) {
-
         String correlationId = UUID.randomUUID().toString();
 
-        log.error(
-                "Unexpected error. correlationId={}",
-                correlationId,
-                ex
+        log.error("Unexpected error. correlationId={}", correlationId, ex);
+
+        ProblemDetail problemDetail = problemDetail(
+                ErrorCode.INTERNAL_ERROR.getStatus(),
+                "An unexpected error occurred",
+                ErrorCode.INTERNAL_ERROR.name()
         );
 
-        ProblemDetail problemDetail = problemDetail(ErrorCode.INTERNAL_ERROR.getStatus(), "An unexpected error occurred" , ErrorCode.INTERNAL_ERROR.name());
-
-        problemDetail.setProperty(
-                "correlationId",
-                correlationId
-        );
-
-        return ResponseEntity
-                .status(ErrorCode.INTERNAL_ERROR.getStatus())
-                .body(problemDetail);
+        problemDetail.setProperty("correlationId", correlationId);
+        return ResponseEntity.status(ErrorCode.INTERNAL_ERROR.getStatus()).body(problemDetail);
     }
 
     @Override
@@ -75,8 +64,8 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             Object body,
             HttpHeaders headers,
             HttpStatusCode statusCode,
-            WebRequest request) {
-
+            WebRequest request
+    ) {
         ProblemDetail problemDetail;
 
         if (body instanceof ProblemDetail existing) {
@@ -85,55 +74,67 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             problemDetail = ProblemDetail.forStatus(statusCode);
         }
 
-        problemDetail.setProperty(
-                "errorCode",
-                resolveErrorCode(ex, statusCode)
-        );
+        problemDetail.setProperty("errorCode", resolveErrorCode(ex, statusCode));
+        problemDetail.setProperty("timestamp", Instant.now(clock));
 
-        problemDetail.setProperty(
-                "timestamp",
-                Instant.now(clock)
-        );
-
-        return super.handleExceptionInternal(
-                ex,
-                problemDetail,
-                headers,
-                statusCode,
-                request
-        );
+        return super.handleExceptionInternal(ex, problemDetail, headers, statusCode, request);
     }
 
-    private String resolveErrorCode(
-            Exception ex,
-            HttpStatusCode statusCode) {
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(
+            MethodArgumentNotValidException ex,
+            HttpHeaders headers,
+            HttpStatusCode status,
+            WebRequest request
+    ) {
+        ProblemDetail problemDetail = problemDetail(
+                status,
+                "Request validation failed",
+                ErrorCode.VALIDATION_FAILED.name()
+        );
 
+        Map<String, String> fieldErrors = new LinkedHashMap<>();
+        ex.getBindingResult().getFieldErrors().forEach(error ->
+                fieldErrors.put(error.getField(), error.getDefaultMessage())
+        );
+
+        problemDetail.setProperty("fieldErrors", fieldErrors);
+        return ResponseEntity.status(status).headers(headers).body(problemDetail);
+    }
+
+    @Override
+    protected ResponseEntity<Object> handleHandlerMethodValidationException(
+            HandlerMethodValidationException ex,
+            HttpHeaders headers,
+            HttpStatusCode status,
+            WebRequest request) {
+
+        ProblemDetail problemDetail = problemDetail(
+                HttpStatus.BAD_REQUEST,
+                "Request validation failed",
+                ErrorCode.VALIDATION_FAILED.name()
+        );
+
+        return ResponseEntity.badRequest().body(problemDetail);
+    }
+
+    private String resolveErrorCode(Exception ex, HttpStatusCode statusCode) {
         if (statusCode.value() == HttpStatus.NOT_FOUND.value()) {
             return "RESOURCE_NOT_FOUND";
         }
-
         if (statusCode.value() == HttpStatus.METHOD_NOT_ALLOWED.value()) {
             return "METHOD_NOT_ALLOWED";
         }
-
         if (statusCode.value() == HttpStatus.BAD_REQUEST.value()) {
             return "MALFORMED_REQUEST";
         }
-
         return "HTTP_" + statusCode.value();
     }
 
-    private ProblemDetail problemDetail(
-            HttpStatusCode status,
-            String detail,
-            String errorCode) {
-
-        ProblemDetail problemDetail =
-                ProblemDetail.forStatusAndDetail(status, detail);
-
+    private ProblemDetail problemDetail(HttpStatusCode status, String detail, String errorCode) {
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(status, detail);
         problemDetail.setProperty("errorCode", errorCode);
         problemDetail.setProperty("timestamp", Instant.now(clock));
-
         return problemDetail;
     }
 }

@@ -2,7 +2,7 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/meterflow_test
     username: meterflow
-    password: ${DB_PASSWORD:postgres123}
+    password: ${DB_PASSWORD}
 
   jpa:
     hibernate:
@@ -11,7 +11,7 @@ spring:
 
   flyway:
     enabled: true
-    clean-disabled: false
+    clean-disabled: true
 
 management:
   endpoints:

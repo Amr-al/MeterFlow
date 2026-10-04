@@ -4,34 +4,29 @@ import org.springframework.http.HttpStatus;
 
 public enum ErrorCode {
 
-    CUSTOMER_NOT_FOUND(
-            HttpStatus.NOT_FOUND,
-            "NOT_FOUND"
-    ),
+    CUSTOMER_NOT_FOUND(HttpStatus.NOT_FOUND),
+    PLAN_NOT_FOUND(HttpStatus.NOT_FOUND),
+    PRODUCT_NOT_FOUND(HttpStatus.NOT_FOUND),
+    SUBSCRIPTION_NOT_FOUND(HttpStatus.NOT_FOUND),
 
-    INTERNAL_ERROR(
-            HttpStatus.INTERNAL_SERVER_ERROR,
-            "INTERNAL_SERVER_ERROR"
-    ),
+    DUPLICATE_RESOURCE(HttpStatus.CONFLICT),
+    CONCURRENT_MODIFICATION(HttpStatus.CONFLICT),
+    SUBSCRIPTION_ALREADY_ACTIVE(HttpStatus.CONFLICT),
 
-    INVALID_REQUEST(
-            HttpStatus.BAD_REQUEST,
-            "INVALID_REQUEST"
-    );
+    VALIDATION_FAILED(HttpStatus.BAD_REQUEST),
+    INVALID_REQUEST(HttpStatus.BAD_REQUEST),
+    CUSTOMER_NOT_ACTIVE(HttpStatus.BAD_REQUEST),
+    PLAN_NOT_ACTIVE(HttpStatus.BAD_REQUEST),
+
+    INTERNAL_ERROR(HttpStatus.INTERNAL_SERVER_ERROR);
 
     private final HttpStatus status;
-    private final String message;
 
-    ErrorCode(HttpStatus status, String message) {
+    ErrorCode(HttpStatus status) {
         this.status = status;
-        this.message = message;
     }
 
     public HttpStatus getStatus() {
         return status;
-    }
-
-    public String getMessage() {
-        return message;
     }
 }

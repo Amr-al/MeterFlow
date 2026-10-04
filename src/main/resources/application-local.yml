@@ -2,7 +2,6 @@ spring:
   datasource:
     url: jdbc:postgresql://localhost:5432/meterflow
     username: meterflow
-    password: ${DB_PASSWORD:postgres123}
-
+    password: ${DB_PASSWORD}
   jpa:
     show-sql: true

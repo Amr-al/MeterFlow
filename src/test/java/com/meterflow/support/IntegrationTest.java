@@ -7,5 +7,5 @@ import org.springframework.test.context.ActiveProfiles;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
-public abstract class IntegrationTest {
+public abstract class  IntegrationTest {
 }
