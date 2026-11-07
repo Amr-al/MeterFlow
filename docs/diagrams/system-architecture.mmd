@@ -1,0 +1,44 @@
+flowchart TB
+    subgraph clients["Clients"]
+        admin["Operator / Postman<br/>(no authentication)"]
+        custsys["Customer System<br/>(header X-API-Key)"]
+    end
+
+    subgraph app["MeterFlow — Spring Boot 4.1.1 / Java 17 / embedded Tomcat :8080"]
+        direction TB
+        fcp["FilterChainProxy"]
+        chain1["SecurityFilterChain @Order 1<br/>securityMatcher /v1/**<br/>ApiKeyAuthenticationFilter"]
+        chain2["SecurityFilterChain @Order 2<br/>any other path<br/>permitAll"]
+        ds["DispatcherServlet"]
+
+        subgraph control["Control plane"]
+            tenancy["tenancy<br/>CustomerController"]
+            catalog["catalog<br/>CatalogAdminController"]
+            subscription["subscription<br/>SubscriptionController"]
+            credential["credential<br/>ApiKeyAdminController"]
+        end
+
+        subgraph data["Data plane"]
+            gateway["gateway<br/>MeteringController"]
+        end
+
+        errors["common.error<br/>GlobalExceptionHandler"]
+        actuator["Actuator<br/>/actuator/health, /actuator/info"]
+    end
+
+    db[("PostgreSQL<br/>meterflow / meterflow_test")]
+    flyway["Flyway<br/>db/migration V1..V6"]
+
+    admin -->|HTTP JSON| fcp
+    custsys -->|HTTP JSON| fcp
+    fcp -->|path matches /v1/**| chain1
+    fcp -->|otherwise| chain2
+    chain1 -->|authenticated| ds
+    chain1 -.->|invalid or missing key: 401| custsys
+    chain2 --> ds
+    ds --> tenancy & catalog & subscription & credential & gateway
+    ds --> actuator
+    tenancy & catalog & subscription & credential & gateway -.->|MeterFlowException| errors
+    tenancy & catalog & subscription & credential & gateway -->|JPA / JDBC| db
+    chain1 -->|api_key lookup by hash| db
+    flyway -->|migrate on startup| db
