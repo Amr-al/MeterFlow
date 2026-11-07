@@ -1,0 +1,70 @@
+erDiagram
+    customer ||--o{ subscription : "has (customer_id)"
+    customer ||--o{ api_key : "owns (customer_id)"
+    plan ||--o{ subscription : "is subscribed by (plan_id)"
+    plan ||--o{ plan_entitlement : "grants (plan_id)"
+    api_product ||--o{ plan_entitlement : "is granted by (api_product_id)"
+
+    customer {
+        BIGSERIAL id PK
+        TEXT name "NOT NULL, CHECK trimmed length > 0"
+        TEXT status "NOT NULL, default ACTIVE, CHECK ACTIVE or SUSPENDED"
+        TIMESTAMPTZ created_at "NOT NULL"
+        TIMESTAMPTZ updated_at "NOT NULL, default now"
+        BIGINT version "NOT NULL, default 0"
+    }
+
+    api_product {
+        BIGSERIAL id PK
+        TEXT code UK "NOT NULL, CHECK not blank"
+        TEXT display_name "NOT NULL, CHECK not blank"
+        BOOLEAN active "NOT NULL, default true"
+        TIMESTAMPTZ created_at "NOT NULL"
+        TIMESTAMPTZ updated_at "NOT NULL"
+        BIGINT version "NOT NULL, default 0"
+    }
+
+    plan {
+        BIGSERIAL id PK
+        TEXT code UK "NOT NULL, CHECK not blank"
+        TEXT display_name "NOT NULL, CHECK not blank"
+        INTEGER requests_per_minute "NOT NULL, CHECK > 0"
+        BIGINT monthly_quota "NOT NULL, CHECK > 0"
+        BOOLEAN active "NOT NULL, default true"
+        TIMESTAMPTZ created_at "NOT NULL"
+        TIMESTAMPTZ updated_at "NOT NULL"
+        BIGINT version "NOT NULL, default 0"
+    }
+
+    plan_entitlement {
+        BIGSERIAL id PK
+        BIGINT plan_id FK "NOT NULL, UNIQUE with api_product_id"
+        BIGINT api_product_id FK "NOT NULL"
+        BOOLEAN allowed "NOT NULL, default true"
+        BIGINT credit_cost "NOT NULL, default 0, CHECK >= 0"
+        BIGINT version "NOT NULL, default 0"
+    }
+
+    subscription {
+        BIGSERIAL id PK
+        BIGINT customer_id FK "NOT NULL, partial UNIQUE where ACTIVE"
+        BIGINT plan_id FK "NOT NULL"
+        TEXT status "NOT NULL, CHECK ACTIVE, CANCELLED, EXPIRED"
+        TIMESTAMPTZ started_at "NOT NULL"
+        TIMESTAMPTZ current_period_start "NOT NULL"
+        TIMESTAMPTZ current_period_end "NOT NULL, CHECK end > start"
+        TIMESTAMPTZ created_at "NOT NULL"
+        TIMESTAMPTZ updated_at "NOT NULL"
+        BIGINT version "NOT NULL, default 0"
+    }
+
+    api_key {
+        BIGSERIAL id PK
+        BIGINT customer_id FK "NOT NULL, indexed"
+        TEXT key_prefix "NOT NULL, indexed"
+        TEXT key_hash UK "NOT NULL, SHA-256 hex"
+        TEXT status "NOT NULL, CHECK ACTIVE or REVOKED"
+        TIMESTAMPTZ created_at "NOT NULL"
+        TIMESTAMPTZ revoked_at "nullable"
+        BIGINT version "NOT NULL, default 0"
+    }
