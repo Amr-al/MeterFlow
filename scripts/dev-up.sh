@@ -7,14 +7,16 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
-JAVA_HOME="${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
-export JAVA_HOME
+export JAVA_HOME="${METERFLOW_JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
 export PATH="$JAVA_HOME/bin:$PATH"
 
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 DB_USER="${DB_USER:-meterflow}"
-export PGPASSWORD="${DB_PASSWORD:?DB_PASSWORD must be set to start MeterFlow}"
+export DB_PASSWORD="${DB_PASSWORD:-postgres123}"
+export PGPASSWORD="$DB_PASSWORD"
+export PGHOST="${POSTGRES_HOST:-localhost}"
+export PGPORT="${POSTGRES_PORT:-5432}"
 
 echo "Checking PostgreSQL..."
 
