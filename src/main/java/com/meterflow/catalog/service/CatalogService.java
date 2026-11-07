@@ -325,4 +325,34 @@ public class CatalogService {
 
         return PlanEntitlementResponse.from(savedEntitlement);
     }
+
+    @Transactional(readOnly = true)
+    public ApiProductView getApiProduct(String requestedCode) {
+
+        if (requestedCode == null || requestedCode.trim().isEmpty()) {
+            throw new MeterFlowException(
+                    ErrorCode.VALIDATION_FAILED,
+                    "Product code is required"
+            );
+        }
+
+        String code = requestedCode
+                .trim()
+                .toUpperCase(Locale.ROOT);
+
+        ApiProduct apiProduct = apiProductRepository.findByCode(code)
+                .orElseThrow(() -> new MeterFlowException(
+                        ErrorCode.PRODUCT_NOT_FOUND,
+                        "Product not found: " + code
+                ));
+
+        return ApiProductView.from(apiProduct);
+    }
+
+    @Transactional(readOnly = true)
+    public Optional<EntitlementView> findEntitlement(Long planId, Long apiProductId) {
+        return planEntitlementRepository
+                .findByPlanIdAndApiProductId(planId, apiProductId)
+                .map(EntitlementView::from);
+    }
 }

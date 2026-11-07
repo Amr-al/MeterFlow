@@ -5,18 +5,20 @@ import com.meterflow.catalog.api.PlanView;
 import com.meterflow.common.error.ErrorCode;
 import com.meterflow.common.error.MeterFlowException;
 import com.meterflow.subscription.api.SubscriptionResponse;
+import com.meterflow.subscription.api.SubscriptionView;
 import com.meterflow.subscription.domain.Subscription;
 import com.meterflow.subscription.domain.SubscriptionStatus;
 import com.meterflow.subscription.repository.SubscriptionRepository;
 import com.meterflow.tenancy.CustomerFacade;
 import com.meterflow.tenancy.api.CustomerView;
 import com.meterflow.tenancy.domain.CustomerStatus;
-import jakarta.transaction.Transactional;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Optional;
 import org.hibernate.exception.ConstraintViolationException;
 import java.time.ZoneOffset;
 
@@ -117,6 +119,14 @@ public class SubscriptionService {
                         "No active subscription found for customer: " + customerId
                 ));
         return SubscriptionResponse.from(subscription);
+    }
+
+    
+    @Transactional(readOnly = true)
+    public Optional<SubscriptionView> findActiveSubscription(Long customerId) {
+        return subscriptionRepository
+                .findByCustomerIdAndStatus(customerId, SubscriptionStatus.ACTIVE)
+                .map(SubscriptionView::from);
     }
 
     @Transactional

@@ -1,4 +1,8 @@
-package com.meterflow.gateway;
+package com.meterflow.gateway.api;
 
-public record MeteredRequest() {
+import jakarta.validation.constraints.NotBlank;
+
+public record MeteredRequest(
+        @NotBlank String productCode
+) {
 }
