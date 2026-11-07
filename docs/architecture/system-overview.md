@@ -31,8 +31,8 @@ MeterFlow models the commercial catalog (products, plans, entitlements), the cus
 | Question | Status in code |
 |---|---|
 | 1. Who is calling? | ✅ Implemented: [`ApiKeyAuthenticationProvider`](../../src/main/java/com/meterflow/security/ApiKeyAuthenticationProvider.java) |
-| 2. Are they allowed? | ⚠️ Partial: product existence only, in [`MeteringService`](../../src/main/java/com/meterflow/gateway/service/MeteringService.java) |
-| 3. How much does it cost? | ❌ Not yet. Data is modelled in `plan_entitlement.credit_cost` but not read on the data plane (M3) |
+| 2. Are they allowed? | ✅ Implemented (M3): customer `ACTIVE`, product exists and active, `ACTIVE` subscription, allowed entitlement, in [`MeteringService`](../../src/main/java/com/meterflow/gateway/service/MeteringService.java). Billing-period expiry is not checked yet (**[Roadmap]** M5) |
+| 3. How much does it cost? | ✅ Resolved (M3): `plan_entitlement.credit_cost` is returned as `creditCost`. ❌ Not charged yet: no wallet debit or usage record (**[Roadmap]** M4) |
 | 4. Within limits? | ❌ Not yet. Data is modelled in `plan` but not enforced (**[Roadmap]** M5 quota, M7–M9 rate limit) |
 
 ## 2. Actors and Roles
@@ -153,7 +153,7 @@ flowchart TB
 | AD-4 | Stateless data-plane authentication | Horizontal scalability, no session store | `SessionCreationPolicy.STATELESS` |
 | AD-5 | Business codes normalized to upper case | Case-insensitive identifiers without SQL `lower()` | `trim().toUpperCase(Locale.ROOT)` in `CatalogService` |
 | AD-6 | RFC 7807 `ProblemDetail` with a stable `errorCode` | Machine-readable, consistent error contract | [`GlobalExceptionHandler`](../../src/main/java/com/meterflow/common/error/GlobalExceptionHandler.java) |
-| AD-7 | Credits as `BIGINT` milli-credits, never float/double | Exact financial arithmetic | **[Roadmap]** The column type `BIGINT` exists. The unit is not documented in code **[Unverified]** |
+| AD-7 | Credits as `BIGINT` milli-credits, never float/double | Exact financial arithmetic | `plan_entitlement.credit_cost BIGINT`, `long creditCost` through `EntitlementView`, `UsageAuthorization` and `MeteredResponse`. The milli-credit unit is a project convention; the code does not encode it |
 | AD-8 | Wallet debits will be atomic, not optimistic-locked | Throughput and correctness under contention | **[Roadmap]** M4, not implemented |
 | AD-9 | Billing period is per customer, not the calendar month | Fair period boundaries | `subscription.current_period_start/end` + **[Roadmap]** M5 |
 
@@ -163,7 +163,7 @@ flowchart TB
 |---|---|---|
 | Control plane is unauthenticated | Anyone who can reach the service can create customers and issue keys | **[Roadmap]** M10 |
 | `security` reads `credential` internals directly (`ApiKeyRepository`, `ApiKeyHasher`) | Breaks the facade boundary. [`CredentialFacade`](../../src/main/java/com/meterflow/credential/CredentialFacade.java) exists but is empty | Not scheduled |
-| `CatalogFacade.getApiProduct` returns `ApiProductResponse`, an HTTP DTO | Changing the API response shape can affect the gateway module | Not scheduled |
+| `CustomerView` exposes `tenancy.domain.CustomerStatus` | `subscription` and `gateway` import a `tenancy` domain enum | Not scheduled |
 | `SubscriptionService` imports `tenancy.domain.CustomerStatus` | Minor cross-module domain coupling | Not scheduled |
 | `CustomerController.getAll` returns the JPA entity `Customer` | Leaks persistence fields (`version`, timestamps) | Not scheduled |
 | No background processing | `Subscription.expire()` and `Customer.suspend()` exist but are never called | **[Roadmap]** M5 billing periods |

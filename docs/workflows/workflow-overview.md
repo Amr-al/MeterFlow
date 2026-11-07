@@ -40,14 +40,14 @@ flowchart LR
     subgraph use["Customer system: ongoing"]
         U1["POST /v1/usage<br/>X-API-Key"] --> U2{"authenticated?"}
         U2 -- no --> U3["401"]
-        U2 -- yes --> U4{"product exists?"}
-        U4 -- no --> U5["404 PRODUCT_NOT_FOUND"]
-        U4 -- yes --> U6["200 customerId, productCode"]
+        U2 -- yes --> U4{"authorized?<br/>customer, product,<br/>subscription, entitlement"}
+        U4 -- no --> U5["403 or 404 with errorCode"]
+        U4 -- yes --> U6["200 with creditCost"]
     end
     setup --> onboard --> use
 ```
 
-**Explanation:** The operator first builds the commercial catalog, then onboards each customer: create the customer, subscribe them, issue a key. After that the customer's own system calls the data plane on its own. The subscribe step and the key-issue step are independent, so they can run in either order, because nothing in the code requires a subscription before a key is issued.
+**Explanation:** The operator first builds the commercial catalog, then onboards each customer: create the customer, subscribe them, issue a key. After that the customer's own system calls the data plane on its own. The subscribe step and the key-issue step can run in either order, because nothing requires a subscription before a key is issued. A key without an `ACTIVE` subscription authenticates, but every `/v1/usage` call is rejected with `403 NO_ACTIVE_SUBSCRIPTION`. The plan also needs an allowed entitlement for the product (WF-1 step 3), or calls get `403 PRODUCT_NOT_ENTITLED`.
 
 ## 3. WF-1 Catalog Setup
 
@@ -57,7 +57,7 @@ flowchart LR
 | 2 | `POST /admin/plans {"code":"starter",...}` | `CatalogService.createPlan`: same pattern | 201. Row in `plan` |
 | 3 | `PUT /admin/plans/starter/entitlements/sms {"allowed":true,"creditCost":1000}` | `CatalogService.updatePlanEntitlement`: inserts the row, or updates it if the pair already exists | 200. Row in `plan_entitlement` |
 | 4 (optional) | `PATCH /admin/plans/STARTER {"requestsPerMinute":120}` | Partial update by dirty checking | 200 |
-| 5 (optional) | `PATCH /admin/api-products/SMS {"active":false}` | Deactivate. **Today this does not block `/v1/usage`** | 200 |
+| 5 (optional) | `PATCH /admin/api-products/SMS {"active":false}` | Deactivate. From then on `/v1/usage` rejects the product with `403 PRODUCT_INACTIVE` | 200 |
 
 Decision points and errors: duplicate code → 409. Unknown plan or product on the first upsert → 404. Invalid numbers → 400.
 
@@ -115,39 +115,45 @@ flowchart LR
 
 ## 7. WF-5 Metered API Call (Data Plane)
 
-**Current implementation:**
+Implemented in M3:
 
 | Step | Component | Action | Failure |
 |---|---|---|---|
 | 1 | `FilterChainProxy` | Selects `apiSecurityFilterChain` for `/v1/**` | — |
 | 2 | `ApiKeyAuthenticationFilter` | Reads `X-API-Key` | Missing → 401 |
-| 3 | `ApiKeyAuthenticationProvider` | SHA-256, then `findByKeyHash`, then a status check | Unknown or revoked → 401 |
+| 3 | `ApiKeyAuthenticationProvider` | SHA-256, then `findByKeyHash`, then a key status check | Unknown or revoked → 401 |
 | 4 | `SecurityContextHolder` | Stores `customerId` | — |
-| 5 | `MeteringController.recordUsage` | `@Valid` body. `CurrentCustomer.getCustomerId()` | Blank code → 400 |
-| 6 | `MeteringService.process` → `CatalogFacade.getApiProduct` | Product lookup | Unknown → 404 |
-| 7 | — | Returns `{customerId, productCode}` | — |
-| 8 | Filter `finally` | Clears the security context | — |
+| 5 | `MeteringController.recordUsage` | `@Valid` body. `CurrentCustomer.getCustomerId()` | Blank code → 400 `VALIDATION_FAILED` |
+| 6 | `MeteringService.authorize` → `CustomerFacade.getCustomer` | Customer must be `ACTIVE` | `SUSPENDED` → 403 `CUSTOMER_SUSPENDED` |
+| 7 | → `CatalogFacade.getApiProduct` | Product lookup by normalized code, then `active` check | Unknown → 404 `PRODUCT_NOT_FOUND`; inactive → 403 `PRODUCT_INACTIVE` |
+| 8 | → `SubscriptionFacade.findActiveSubscription` | `ACTIVE` subscription for the customer | None → 403 `NO_ACTIVE_SUBSCRIPTION` |
+| 9 | → `CatalogFacade.findEntitlement(planId, productId)` | Entitlement must exist and be `allowed` | Missing or `allowed=false` → 403 `PRODUCT_NOT_ENTITLED` |
+| 10 | `MeteringService` | Builds `UsageAuthorization` with `creditCost` from the entitlement | — |
+| 11 | `MeteringController` | `MeteredResponse.from(...)` → 200 `{customerId, productCode, subscriptionId, planId, creditCost}` | — |
+| 12 | Filter `finally` | Clears the security context | — |
 
-**Target M3 flow [Roadmap]**, extending steps 6–7. This is not implemented:
+Steps 6–10 run in one `@Transactional(readOnly = true)` transaction.
 
 ```mermaid
 flowchart TD
     A["authenticated customerId + productCode"] --> B{"customer ACTIVE?"}
-    B -- no --> X1["reject"]
-    B -- yes --> C{"product exists and active?"}
-    C -- no --> X2["reject"]
-    C -- yes --> D{"ACTIVE subscription?"}
-    D -- no --> X3["reject"]
-    D -- yes --> E{"entitlement for plan and product, allowed?"}
-    E -- no --> X4["reject"]
-    E -- yes --> F["resolve creditCost, milli-credits"]
-    F --> G["200 response with cost"]
-    G -. "M4" .-> H["atomic wallet debit + ledger entry"]
-    G -. "M5" .-> I["monthly quota check within billing period"]
-    G -. "M6" .-> J["idempotency key claim"]
+    B -- no --> X1["403 CUSTOMER_SUSPENDED"]
+    B -- yes --> C{"product exists?"}
+    C -- no --> X2a["404 PRODUCT_NOT_FOUND"]
+    C -- yes --> C2{"product active?"}
+    C2 -- no --> X2b["403 PRODUCT_INACTIVE"]
+    C2 -- yes --> D{"ACTIVE subscription?"}
+    D -- no --> X3["403 NO_ACTIVE_SUBSCRIPTION"]
+    D -- yes --> E{"entitlement exists and allowed?"}
+    E -- no --> X4["403 PRODUCT_NOT_ENTITLED"]
+    E -- yes --> F["creditCost from entitlement, milli-credits"]
+    F --> G["UsageAuthorization then 200 MeteredResponse"]
+    G -. "M4 planned" .-> H["atomic wallet debit + ledger entry + usage record"]
+    G -. "M5 planned" .-> I["monthly quota + billing-period expiry"]
+    G -. "M6 planned" .-> J["idempotency key claim"]
 ```
 
-The error codes and HTTP statuses for the "reject" branches have **not been defined** in code yet **[Unverified]**.
+Not checked by design: `plan.active` (a deactivated plan keeps existing subscribers). Not checked yet: `subscription.current_period_end` (**[Roadmap]** M5).
 
 ## 8. Workflow Gaps
 

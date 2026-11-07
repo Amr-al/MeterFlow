@@ -15,6 +15,7 @@ flowchart LR
 
     subgraph subscription["subscription"]
         SubscriptionController --> SubscriptionService
+        SubscriptionFacade --> SubscriptionService
         SubscriptionService --> SubscriptionRepository
     end
 
@@ -32,7 +33,9 @@ flowchart LR
     end
 
     subgraph gateway["gateway"]
-        MeteringController --> MeteringService
+        MeteringController -->|authorize| MeteringService
+        MeteringService -->|returns| UsageAuthorization
+        MeteringController -->|from| MeteredResponse
     end
 
     subgraph shared["config + common.error"]
@@ -43,7 +46,9 @@ flowchart LR
     SubscriptionService -->|getCustomer| CustomerFacade
     SubscriptionService -->|getPlan| CatalogFacade
     ApiKeyService -->|getCustomer| CustomerFacade
-    MeteringService -->|getApiProduct| CatalogFacade
+    MeteringService -->|getCustomer| CustomerFacade
+    MeteringService -->|getApiProduct, findEntitlement| CatalogFacade
+    MeteringService -->|findActiveSubscription| SubscriptionFacade
     MeteringController -->|getCustomerId| CurrentCustomer
     ApiKeyAuthenticationProvider -.->|direct, bypasses facade| ApiKeyRepository
     ApiKeyAuthenticationProvider -.->|direct, bypasses facade| ApiKeyHasher
