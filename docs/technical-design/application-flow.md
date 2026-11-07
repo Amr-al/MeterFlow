@@ -206,13 +206,14 @@ Transactional boundaries per service method:
 | `CustomerService.getCustomer` | `readOnly` | |
 | `CustomerService.createCustomer` | read-write | |
 | `CustomerService.getAll` | **none** | Relies on the repository's own transaction |
-| `CatalogService.getPlan`, `getPlans`, `getPlanByCode`, `getAllApiProducts`, `getApiProduct` | `readOnly` | |
+| `CatalogService.getPlan`, `getPlans`, `getPlanByCode`, `getAllApiProducts`, `getApiProduct`, `findEntitlement` | `readOnly` | |
 | `CatalogService.createPlan`, `updatePlan`, `createApiProduct`, `updateApiProductStatus`, `updatePlanEntitlement` | read-write | Updates rely on dirty checking |
 | `SubscriptionService.subscribe`, `cancelActiveSubscription` | read-write | |
 | `SubscriptionService.getActiveSubscription` | read-write | Could be `readOnly` |
+| `SubscriptionService.findActiveSubscription` | `readOnly` | Used by `SubscriptionFacade` (data plane) |
 | `ApiKeyService.createApiKey`, `revokeApiKey` | read-write | |
 | `ApiKeyService.listApiKeys` | `readOnly` | |
-| `MeteringService.process` | **none** | It does a single read through `CatalogFacade`, which opens its own `readOnly` transaction |
+| `MeteringService.authorize` | `readOnly` | One transaction for the four authorization reads. The facade methods it calls join it (`REQUIRED`). **[Roadmap]** Becomes read-write in M4 when the debit is added |
 | `ApiKeyAuthenticationProvider.authenticate` | **none** | `findByKeyHash` runs in Spring Data's default read-only repository transaction |
 
 ### Transaction propagation example: `subscribe`

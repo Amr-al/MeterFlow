@@ -8,7 +8,7 @@
 2. [Catalog](#2-catalog)
 3. [Subscription](#3-subscription)
 4. [Credentials (API Keys)](#4-credentials-api-keys)
-5. [Metering Gateway — M3 (in progress)](#5-metering-gateway--m3-in-progress)
+5. [Metering Gateway — M3](#5-metering-gateway--m3)
 6. [Business Rule Matrix](#6-business-rule-matrix)
 7. [Entity State Machines](#7-entity-state-machines)
 
@@ -45,7 +45,8 @@ So `" sms "`, `"Sms"` and `"SMS"` all refer to the same product. `Locale.ROOT` a
 | `createApiProduct(req)` | Normalize the code and trim `displayName`. Reject duplicates with `existsByCode`. New products start `active = true` | `DUPLICATE_RESOURCE` (409) |
 | `getAllApiProducts(int page)` | `PageRequest.of(page, 10)`. The page size is fixed at 10 and the sort order is unspecified | — |
 | `updateApiProductStatus(req, code)` | `active = true` → `activate(now)`, `false` → `deactivate(now)` | `PRODUCT_NOT_FOUND` (404) |
-| `getApiProduct(code)` | Used by `CatalogFacade` / gateway. **Does not check `active`** | `VALIDATION_FAILED` (blank), `PRODUCT_NOT_FOUND` |
+| `getApiProduct(code)` | Used by `CatalogFacade` / gateway. Returns `ApiProductView`. Does not check `active` itself; the gateway does | `VALIDATION_FAILED` (blank), `PRODUCT_NOT_FOUND` |
+| `findEntitlement(planId, apiProductId)` | Used by `CatalogFacade` / gateway. Returns `Optional<EntitlementView>`; the caller decides what "absent" means | — |
 
 ### 2.3 Plans
 
@@ -94,7 +95,7 @@ Notes:
 
 - The response is always `200 OK`, even when a row was inserted.
 - The plan and product are **not** required to be `active`.
-- `creditCost` is a `long` ≥ 0. **[Roadmap]** It is intended to be expressed in milli-credits (1 credit = 1,000). The code does not define the unit **[Unverified]**.
+- `creditCost` is a `long` ≥ 0, expressed in milli-credits by project convention (1 credit = 1,000). The code does not encode the unit; it stores and returns the integer as-is. See [§ 5.3](#53-business-decisions).
 
 ## 3. Subscription
 
@@ -154,51 +155,97 @@ hash   (stored)        = lower-case hex SHA-256 of the full 51-char key (64 char
 
 Authentication with these keys is described in [Security](security.md).
 
-## 5. Metering Gateway — M3 (in progress)
+## 5. Metering Gateway — M3
 
-Sources: [`MeteringController`](../../src/main/java/com/meterflow/gateway/api/MeteringController.java), [`MeteringService`](../../src/main/java/com/meterflow/gateway/service/MeteringService.java)
+Sources: [`MeteringController`](../../src/main/java/com/meterflow/gateway/api/MeteringController.java), [`MeteringService`](../../src/main/java/com/meterflow/gateway/service/MeteringService.java), [`UsageAuthorization`](../../src/main/java/com/meterflow/gateway/service/UsageAuthorization.java), [`MeteredResponse`](../../src/main/java/com/meterflow/gateway/api/MeteredResponse.java)
 
-### 5.1 Implemented behaviour
+M3 answers two questions for every data-plane call: **is this customer allowed to call this product right now?** and **how much does the call cost?** It does not charge, record or throttle the call. Those are M4 and later.
+
+### 5.1 Components
+
+| Component | Module | Responsibility |
+|---|---|---|
+| `MeteringController` | `gateway.api` | `POST /v1/usage`. Validates the body (`@NotBlank productCode`), takes the customer ID from `CurrentCustomer` (the authenticated API key, never the body), calls `MeteringService.authorize`, and maps the result to `MeteredResponse` |
+| `MeteringService` | `gateway.service` | Orchestrates the authorization checks in a single `@Transactional(readOnly = true)` method. Talks to other modules **only through their facades** |
+| `UsageAuthorization` | `gateway.service` | Internal result of a successful authorization: `(customerId, subscriptionId, planId, apiProductId, productCode, creditCost)`. Carries everything the upcoming wallet debit (M4) needs |
+| `MeteredResponse` | `gateway.api` | Public HTTP contract: `(customerId, productCode, subscriptionId, planId, creditCost)`. Built with `MeteredResponse.from(UsageAuthorization)` |
+| `CustomerFacade.getCustomer(id)` | `tenancy` | Returns `CustomerView(id, name, status)`. Throws `404 CUSTOMER_NOT_FOUND` if missing |
+| `CatalogFacade.getApiProduct(code)` | `catalog` | Normalizes the code (`trim` + upper case) and returns `ApiProductView(id, code, active)`. Throws `404 PRODUCT_NOT_FOUND` if missing |
+| `CatalogFacade.findEntitlement(planId, productId)` | `catalog` | Returns `Optional<EntitlementView(id, allowed, creditCost)>`. The lookup is by IDs on the unique `(plan_id, api_product_id)` constraint, with no joins |
+| `SubscriptionFacade.findActiveSubscription(customerId)` | `subscription` | Returns `Optional<SubscriptionView(id, customerId, planId, currentPeriodStart, currentPeriodEnd)>` for the customer's `ACTIVE` subscription |
+
+The facades return `Optional` where "not found" is a **business decision for the caller** (no subscription, no entitlement → the gateway decides it means 403). They throw where "not found" means the same thing everywhere (unknown product → 404).
+
+### 5.2 Authorization flow
+
+`MeteringService.authorize(customerId, productCode)` runs these steps in order and stops at the first failure:
+
+| # | Step | Source | Failure | HTTP |
+|---|---|---|---|---|
+| 0 | Body validation (`productCode` not blank) | `@Valid MeteredRequest` | `VALIDATION_FAILED` | 400 |
+| 1 | Resolve the customer and require `status == ACTIVE` | `CustomerFacade.getCustomer` | `CUSTOMER_NOT_FOUND` / `CUSTOMER_SUSPENDED` | 404 / 403 |
+| 2 | Product must exist, then must be `active` | `CatalogFacade.getApiProduct` | `PRODUCT_NOT_FOUND` / `PRODUCT_INACTIVE` | 404 / 403 |
+| 3 | Customer must have an `ACTIVE` subscription | `SubscriptionFacade.findActiveSubscription` | `NO_ACTIVE_SUBSCRIPTION` | 403 |
+| 4 | The subscription's plan must have an entitlement for the product with `allowed = true` | `CatalogFacade.findEntitlement(subscription.planId, product.id)` | `PRODUCT_NOT_ENTITLED` | 403 |
+| 5 | Take the credit cost from the entitlement | `EntitlementView.creditCost` | — | — |
+| 6 | Build `UsageAuthorization` | `MeteringService` | — | — |
+| 7 | Convert to `MeteredResponse` and return `200 OK` | `MeteringController` | — | 200 |
+
+`CUSTOMER_NOT_FOUND` is practically unreachable: the customer ID comes from an authenticated API key, and `api_key.customer_id` is a foreign key to `customer`. A request without a valid key is rejected earlier with `401` by the security filter chain.
 
 ```java
-// MeteringController.recordUsage
-Long customerId = currentCustomer.getCustomerId();          // from the API key, never from the body
-return ok(meteringService.process(customerId, request.productCode()));
+// MeteringService.authorize (abridged)
+CustomerView customer = customerFacade.getCustomer(customerId);
+if (customer.status() != CustomerStatus.ACTIVE) throw CUSTOMER_SUSPENDED;
 
-// MeteringService.process
-catalogFacade.getApiProduct(productCode);                   // 404 PRODUCT_NOT_FOUND if missing
-return new MeteredResponse(customerId, productCode);        // productCode echoed exactly as received
+ApiProductView product = catalogFacade.getApiProduct(productCode);
+if (!product.active()) throw PRODUCT_INACTIVE;
+
+SubscriptionView subscription = subscriptionFacade.findActiveSubscription(customerId)
+        .orElseThrow(NO_ACTIVE_SUBSCRIPTION);
+
+EntitlementView entitlement = catalogFacade.findEntitlement(subscription.planId(), product.id())
+        .filter(EntitlementView::allowed)
+        .orElseThrow(PRODUCT_NOT_ENTITLED);
+
+return new UsageAuthorization(customerId, subscription.id(), subscription.planId(),
+        product.id(), product.code(), entitlement.creditCost());
 ```
 
-### 5.2 M3 scope versus implementation
+**Why this order:** the cheapest and broadest check runs first (a suspended customer is rejected without touching the catalog). Product comes before subscription so an unknown product code gets the more accurate `404`. The entitlement check comes last because it needs IDs from both the product and the subscription.
 
-| M3 deliverable **[Roadmap]** | Implemented? | Notes |
+**Transactions:** all reads run inside one read-only transaction on one connection. The facades' own `@Transactional(readOnly = true)` methods join it (propagation `REQUIRED`). The result is four indexed point lookups per call.
+
+### 5.3 Business decisions
+
+| Decision | Behaviour | Verified by test |
 |---|---|---|
-| Usage API | ✅ | `POST /v1/usage` |
-| Customer resolution | ✅ | `CurrentCustomer` |
-| Product validation | ⚠️ Partial | Checks existence only. An inactive product is accepted |
-| Subscription validation | ❌ | — |
-| Entitlement checks | ❌ | — |
-| Credit cost resolution | ❌ | — |
-| Customer status check | ❌ | A `SUSPENDED` customer with an active key is accepted |
-| Response uses the normalized code | ❌ | `"sms"` is echoed back as `"sms"` |
+| Missing entitlement = deny | No `plan_entitlement` row for (plan, product) → `403 PRODUCT_NOT_ENTITLED` | `shouldRejectProductMissingFromPlan` |
+| `allowed = false` = deny | Same error as a missing row; the client cannot tell the two apart | `shouldRejectProductDisallowedByPlan` |
+| Deactivated plan keeps existing subscribers | `plan.active` is **not** checked on the data plane. Deactivating a plan only blocks new subscriptions | `shouldKeepServingSubscribersAfterPlanIsDeactivated` |
+| Canonical product code | The response returns the code as stored (`"  sms "` → `"SMS"`), not as sent | `shouldNormalizeProductCode` |
+| Credit cost as `long` milli-credits | `creditCost` is a `long` (DB `BIGINT`), never floating point. By project convention 1 credit = 1,000 milli-credits; the code stores and returns the integer as-is and does not encode the unit | `shouldAuthorizeUsageAndReturnCreditCost` (`1500`) |
+| `apiProductId` stays internal | Present in `UsageAuthorization` (needed by M4) but **not** in `MeteredResponse` | — |
+| Subscription status only | Only `status = ACTIVE` is checked. `currentPeriodEnd` is **not** compared with the current time, so a subscription past its period end still authorizes calls until something marks it `EXPIRED` | — (known gap) |
+| Suspended customer | `403 CUSTOMER_SUSPENDED`, even though the API key itself is still `ACTIVE` | `shouldRejectSuspendedCustomer` |
 
-### 5.3 Data available for completing M3
+### 5.4 Implemented versus planned
 
-Everything needed to finish M3 already exists in the schema:
-
-| Check | Source |
-|---|---|
-| Customer active | `customer.status` via `CustomerFacade.getCustomer` |
-| Product active | `api_product.active` |
-| Active subscription and plan | `subscription WHERE customer_id=? AND status='ACTIVE'` (at most one row, guaranteed by the partial unique index) |
-| Entitlement allowed + cost | `plan_entitlement WHERE plan_id=? AND api_product_id=?` (at most one row, guaranteed by `uq_plan_entitlement_plan_product`) |
-
-Points not yet decided in the code **[Unverified]**:
-
-- Should an existing subscription keep working when its plan is later deactivated?
-- Should a missing entitlement row be treated as "deny"?
-- Which HTTP status and error codes should the data plane use when it rejects a request?
+| Capability | Status | Milestone |
+|---|---|---|
+| Usage API `POST /v1/usage` | ✅ Implemented | M3 |
+| Customer resolution from API key | ✅ Implemented | M2/M3 |
+| Customer status check | ✅ Implemented | M3 |
+| Product existence + active check | ✅ Implemented | M3 |
+| Active subscription check (status only) | ✅ Implemented | M3 |
+| Entitlement check | ✅ Implemented | M3 |
+| Credit-cost resolution | ✅ Implemented (returned, not charged) | M3 |
+| Wallet debit / ledger | ❌ Not implemented | **[Roadmap]** M4 |
+| Usage record / usage event persistence | ❌ Not implemented. A call leaves no trace in the database | **[Roadmap]** M4 / M7–M9 |
+| Billing-period expiry (`currentPeriodEnd`) | ❌ Not checked | **[Roadmap]** M5 |
+| Monthly quota enforcement | ❌ Not implemented (`plan.monthly_quota` is stored but unused) | **[Roadmap]** M5 |
+| Idempotency keys | ❌ Not implemented. A retried call is authorized again | **[Roadmap]** M6 |
+| Rate limiting | ❌ Not implemented (`plan.requests_per_minute` is stored but unused) | **[Roadmap]** M7–M9 (provisional) |
 
 ## 6. Business Rule Matrix
 

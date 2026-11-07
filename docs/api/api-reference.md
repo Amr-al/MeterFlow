@@ -96,7 +96,6 @@ Unexpected errors include a `correlationId` that matches the server log entry:
 | `PRODUCT_NOT_FOUND` | 404 | Product code does not exist |
 | `SUBSCRIPTION_NOT_FOUND` | 404 | Customer has no `ACTIVE` subscription |
 | `API_KEY_NOT_FOUND` | 404 | Key does not exist **or belongs to another customer** |
-| `API_PRODUCT_NOT_FOUND` | 404 | *Defined but never raised* |
 | `DUPLICATE_RESOURCE` | 409 | Product or plan code already exists |
 | `CONCURRENT_MODIFICATION` | 409 | *Defined but never raised* (optimistic-lock conflicts currently return 500) |
 | `SUBSCRIPTION_ALREADY_ACTIVE` | 409 | Customer already has an `ACTIVE` subscription |
@@ -104,6 +103,10 @@ Unexpected errors include a `correlationId` that matches the server log entry:
 | `INVALID_REQUEST` | 400 | Blank plan or product code on the entitlement upsert |
 | `CUSTOMER_NOT_ACTIVE` | 400 | Subscribing a `SUSPENDED` customer |
 | `PLAN_NOT_ACTIVE` | 400 | Subscribing to an inactive plan |
+| `CUSTOMER_SUSPENDED` | 403 | Data plane: the authenticated customer is `SUSPENDED` |
+| `PRODUCT_INACTIVE` | 403 | Data plane: the product exists but is not active |
+| `NO_ACTIVE_SUBSCRIPTION` | 403 | Data plane: the customer has no `ACTIVE` subscription |
+| `PRODUCT_NOT_ENTITLED` | 403 | Data plane: the subscription's plan has no entitlement for the product, or the entitlement has `allowed = false` |
 | `INTERNAL_ERROR` | 500 | Any unhandled exception |
 
 ### 3.3 Framework error codes (from `handleExceptionInternal`)
@@ -466,7 +469,7 @@ A soft revoke. It is **idempotent**: a second call returns the same body with th
 
 ## 11. Data Plane: Usage
 
-Controller: [`MeteringController`](../../src/main/java/com/meterflow/gateway/api/MeteringController.java). **M3 is in progress.** The behaviour described here is the current implementation.
+Controller: [`MeteringController`](../../src/main/java/com/meterflow/gateway/api/MeteringController.java). Implemented in M3. The endpoint **authorizes** a call and returns its credit cost. It does **not** debit a wallet, store a usage record, deduplicate retries, enforce quota or rate-limit (see [Business Logic § 5.4](../technical-design/business-logic.md#54-implemented-versus-planned)).
 
 ### 11.1 `POST /v1/usage`
 
@@ -476,32 +479,55 @@ Controller: [`MeteringController`](../../src/main/java/com/meterflow/gateway/api
 
 | Field | Type | Rules |
 |---|---|---|
-| `productCode` | string | required, not blank. Case-insensitive for the lookup |
+| `productCode` | string | required, not blank. Case-insensitive and trimmed for the lookup |
 
 ```http
 POST /v1/usage
 X-API-Key: mf_live_3Jx9aB7k…
 Content-Type: application/json
 
-{"productCode": "SMS"}
+{"productCode": "sms"}
 ```
 
 **200 OK**
 
 ```json
-{ "customerId": 42, "productCode": "SMS" }
+{
+  "customerId": 42,
+  "productCode": "SMS",
+  "subscriptionId": 12,
+  "planId": 3,
+  "creditCost": 1500
+}
 ```
 
-- `customerId` comes from the authenticated key, never from the request.
-- `productCode` is echoed **exactly as sent**. If you send `"sms"`, you get `"sms"` back.
+| Field | Type | Meaning |
+|---|---|---|
+| `customerId` | number | From the authenticated key, never from the request |
+| `productCode` | string | The product's **canonical stored code**, not the value as sent (`"sms"` → `"SMS"`) |
+| `subscriptionId` | number | The `ACTIVE` subscription the call was authorized against |
+| `planId` | number | The plan of that subscription |
+| `creditCost` | integer (`long`) | Cost of one call from the plan entitlement, in **milli-credits** (1 credit = 1,000). Never fractional |
 
-| Error | When |
-|---|---|
-| 401 (default error body) | Header missing or blank, key unknown, or key revoked |
-| 400 `VALIDATION_FAILED` | `productCode` blank |
-| 404 `PRODUCT_NOT_FOUND` | Product does not exist |
+The internal product ID is deliberately not part of the response.
 
-**Not yet validated (M3 backlog):** product `active`, customer `ACTIVE`, active subscription, entitlement `allowed`, credit cost. See [Business Logic § 5](../technical-design/business-logic.md#5-metering-gateway--m3-in-progress).
+**Errors**, in the order the checks run:
+
+| Status | `errorCode` | When |
+|---|---|---|
+| 401 (default error body) | — | Header missing or blank, key unknown, or key revoked |
+| 400 | `VALIDATION_FAILED` | `productCode` blank |
+| 403 | `CUSTOMER_SUSPENDED` | The key's customer is `SUSPENDED` |
+| 404 | `PRODUCT_NOT_FOUND` | No product with that code |
+| 403 | `PRODUCT_INACTIVE` | The product is deactivated |
+| 403 | `NO_ACTIVE_SUBSCRIPTION` | The customer has no `ACTIVE` subscription (none, or only `CANCELLED`/`EXPIRED`) |
+| 403 | `PRODUCT_NOT_ENTITLED` | The plan has no entitlement for the product, or it has `allowed = false` |
+
+Notes:
+
+- A **deactivated plan does not block** existing subscribers. Only the subscription status is checked.
+- `currentPeriodEnd` is **not** checked yet (**[Roadmap]** M5).
+- Retrying the same call authorizes it again; there is no idempotency key yet (**[Roadmap]** M6).
 
 ---
 

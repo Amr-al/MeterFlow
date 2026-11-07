@@ -34,12 +34,13 @@ src/main/java/com/meterflow/
 │   └── service/   CustomerService
 ├── catalog/
 │   ├── CatalogFacade.java             # public module API
-│   ├── api/       CatalogAdminController + 8 request/response/view records
+│   ├── api/       CatalogAdminController, request/response records, PlanView, ApiProductView, EntitlementView
 │   ├── domain/    ApiProduct, Plan, PlanEntitlement
 │   ├── repository/ApiProductRepository, PlanRepository, PlanEntitlementRepository
 │   └── service/   CatalogService
 ├── subscription/
-│   ├── api/       SubscriptionController, CreateSubscriptionRequest, SubscriptionResponse
+│   ├── SubscriptionFacade.java        # public module API
+│   ├── api/       SubscriptionController, CreateSubscriptionRequest, SubscriptionResponse, SubscriptionView
 │   ├── domain/    Subscription, SubscriptionStatus
 │   ├── repository/SubscriptionRepository
 │   └── service/   SubscriptionService
@@ -57,7 +58,7 @@ src/main/java/com/meterflow/
 │   └── CurrentCustomer.java           # reads customerId from SecurityContext
 └── gateway/
     ├── api/       MeteringController, MeteredRequest, MeteredResponse
-    └── service/   MeteringService
+    └── service/   MeteringService, UsageAuthorization
 
 src/main/resources/
 ├── application.yml, application-local.yml, application-test.yml
@@ -86,6 +87,7 @@ flowchart LR
 
     subgraph subscription["subscription"]
         SubscriptionController --> SubscriptionService
+        SubscriptionFacade --> SubscriptionService
         SubscriptionService --> SubscriptionRepository
     end
 
@@ -103,7 +105,9 @@ flowchart LR
     end
 
     subgraph gateway["gateway"]
-        MeteringController --> MeteringService
+        MeteringController -->|authorize| MeteringService
+        MeteringService -->|returns| UsageAuthorization
+        MeteringController -->|from| MeteredResponse
     end
 
     subgraph shared["config + common.error"]
@@ -114,7 +118,9 @@ flowchart LR
     SubscriptionService -->|getCustomer| CustomerFacade
     SubscriptionService -->|getPlan| CatalogFacade
     ApiKeyService -->|getCustomer| CustomerFacade
-    MeteringService -->|getApiProduct| CatalogFacade
+    MeteringService -->|getCustomer| CustomerFacade
+    MeteringService -->|getApiProduct, findEntitlement| CatalogFacade
+    MeteringService -->|findActiveSubscription| SubscriptionFacade
     MeteringController -->|getCustomerId| CurrentCustomer
     ApiKeyAuthenticationProvider -.->|direct, bypasses facade| ApiKeyRepository
     ApiKeyAuthenticationProvider -.->|direct, bypasses facade| ApiKeyHasher
@@ -129,7 +135,7 @@ flowchart LR
 **Explanation**
 
 - **Solid arrows inside a module** show the normal layered call path: controller → service → repository.
-- **Solid arrows between modules** always land on a *facade* (`CustomerFacade`, `CatalogFacade`). That is the intended module boundary.
+- **Solid arrows between modules** always land on a *facade* (`CustomerFacade`, `CatalogFacade`, `SubscriptionFacade`). That is the intended module boundary. `MeteringService` is the only component that uses all three.
 - **Dashed arrows** mark boundary violations. `ApiKeyAuthenticationProvider` (security) uses `credential`'s repository and hasher directly.
 - `Clock` is a shared infrastructure bean. Every timestamp the application writes comes from `Instant.now(clock)`.
 
@@ -153,21 +159,23 @@ flowchart LR
 |---|---|---|
 | [`CatalogAdminController`](../../src/main/java/com/meterflow/catalog/api/CatalogAdminController.java) | `@RestController` `/admin` | Product and plan CRUD, entitlement upsert |
 | [`CatalogService`](../../src/main/java/com/meterflow/catalog/service/CatalogService.java) | `@Service` | All catalog business rules (see [Business Logic §2](../technical-design/business-logic.md#2-catalog)) |
-| [`CatalogFacade`](../../src/main/java/com/meterflow/catalog/CatalogFacade.java) | `@Component` | `getPlan(code) → PlanView`, `getApiProduct(code) → ApiProductResponse` |
+| [`CatalogFacade`](../../src/main/java/com/meterflow/catalog/CatalogFacade.java) | `@Component` | `getPlan(code) → PlanView`, `getApiProduct(code) → ApiProductView` (404 if missing), `findEntitlement(planId, apiProductId) → Optional<EntitlementView>` |
 | [`ApiProduct`](../../src/main/java/com/meterflow/catalog/domain/ApiProduct.java) | `@Entity api_product` | `code`, `displayName`, `active`. Methods: `rename`, `activate`, `deactivate` |
 | [`Plan`](../../src/main/java/com/meterflow/catalog/domain/Plan.java) | `@Entity plan` | `code`, `displayName`, `requestsPerMinute`, `monthlyQuota`, `active`. Methods: `rename`, `updateLimits`, `activate`, `deactivate` |
 | [`PlanEntitlement`](../../src/main/java/com/meterflow/catalog/domain/PlanEntitlement.java) | `@Entity plan_entitlement` | `@ManyToOne(LAZY)` to `Plan` and `ApiProduct`, `allowed`, `creditCost`. Method: `updateEntitlement` |
 | `ApiProductRepository` | Spring Data | `findByCode`, `existsByCode`, `findAll(Pageable)` |
 | `PlanRepository` | Spring Data | `findByCode`, `existsByCode` |
-| `PlanEntitlementRepository` | Spring Data | `findByPlanCodeAndApiProductCode` (implicit join) |
-| Records | DTOs | `CreateApiProductRequest`, `UpdateApiProductRequest`, `ApiProductResponse`, `CreatePlanRequest`, `UpdatePlanRequest`, `PlanResponse`, `PlanView`, `UpsertPlanEntitlementRequest`, `PlanEntitlementResponse` |
+| `PlanEntitlementRepository` | Spring Data | `findByPlanCodeAndApiProductCode` (implicit join, used by the admin upsert), `findByPlanIdAndApiProductId` (FK columns only, used by the data plane) |
+| Records | DTOs | `CreateApiProductRequest`, `UpdateApiProductRequest`, `ApiProductResponse`, `CreatePlanRequest`, `UpdatePlanRequest`, `PlanResponse`, `PlanView`, `UpsertPlanEntitlementRequest`, `PlanEntitlementResponse`. Cross-module views: `ApiProductView(id, code, active)`, `EntitlementView(id, allowed, creditCost)` |
 
 ### 3.3 `subscription`
 
 | Class | Stereotype | Responsibility |
 |---|---|---|
 | [`SubscriptionController`](../../src/main/java/com/meterflow/subscription/api/SubscriptionController.java) | `@RestController` `/customers/{customerId}/subscriptions` | `subscribe`, `getActiveSubscription`, `cancelActiveSubscription` |
+| [`SubscriptionFacade`](../../src/main/java/com/meterflow/subscription/SubscriptionFacade.java) | `@Component` | Public API for other modules: `findActiveSubscription(customerId) → Optional<SubscriptionView>` |
 | [`SubscriptionService`](../../src/main/java/com/meterflow/subscription/service/SubscriptionService.java) | `@Service` | Subscription rules and DB-constraint translation |
+| `SubscriptionView` | record | `(id, customerId, planId, currentPeriodStart, currentPeriodEnd)` |
 | [`Subscription`](../../src/main/java/com/meterflow/subscription/domain/Subscription.java) | `@Entity subscription` | `customerId`, `planId` (IDs only), `status`, period fields. Methods: `cancel`, `expire` |
 | `SubscriptionStatus` | enum | `ACTIVE`, `CANCELLED`, `EXPIRED` |
 | `SubscriptionRepository` | Spring Data | `findByCustomerIdAndStatus` |
@@ -200,10 +208,11 @@ flowchart LR
 
 | Class | Stereotype | Responsibility |
 |---|---|---|
-| [`MeteringController`](../../src/main/java/com/meterflow/gateway/api/MeteringController.java) | `@RestController` `/v1` | `POST /usage`: takes the customer from `CurrentCustomer`, never from the body |
-| [`MeteringService`](../../src/main/java/com/meterflow/gateway/service/MeteringService.java) | `@Service` | M3 orchestration. It currently only calls `catalogFacade.getApiProduct` |
+| [`MeteringController`](../../src/main/java/com/meterflow/gateway/api/MeteringController.java) | `@RestController` `/v1` | `POST /usage`: takes the customer from `CurrentCustomer`, never from the body. Calls `authorize` and maps the result with `MeteredResponse.from` |
+| [`MeteringService`](../../src/main/java/com/meterflow/gateway/service/MeteringService.java) | `@Service` | `authorize(customerId, productCode)`, `@Transactional(readOnly = true)`: customer `ACTIVE` → product exists and active → `ACTIVE` subscription → allowed entitlement → credit cost. Uses `CustomerFacade`, `CatalogFacade`, `SubscriptionFacade`. See [Business Logic § 5](../technical-design/business-logic.md#5-metering-gateway--m3) |
+| [`UsageAuthorization`](../../src/main/java/com/meterflow/gateway/service/UsageAuthorization.java) | record | Internal result: `(customerId, subscriptionId, planId, apiProductId, productCode, creditCost)`. Input for the M4 wallet debit |
 | `MeteredRequest` | record | `productCode` (`@NotBlank`) |
-| `MeteredResponse` | record | `(customerId, productCode)` |
+| [`MeteredResponse`](../../src/main/java/com/meterflow/gateway/api/MeteredResponse.java) | record | Public response: `(customerId, productCode, subscriptionId, planId, creditCost)`. Omits `apiProductId` |
 
 ### 3.7 `common.error` and `config`
 
@@ -296,8 +305,8 @@ classDiagram
 
 These are the intended rules, inferred from the code structure:
 
-1. A module may depend on another module **only through its facade** (`tenancy.CustomerFacade`, `catalog.CatalogFacade`).
-2. Facades return **view records** (`CustomerView`, `PlanView`), never entities.
+1. A module may depend on another module **only through its facade** (`tenancy.CustomerFacade`, `catalog.CatalogFacade`, `subscription.SubscriptionFacade`).
+2. Facades return **view records** (`CustomerView`, `PlanView`, `ApiProductView`, `EntitlementView`, `SubscriptionView`), never entities or HTTP DTOs. Where "not found" is the caller's decision, they return `Optional`.
 3. Entities in different modules reference each other by `Long` ID only.
 4. Every module may depend on `common.error` and `config`.
 
@@ -307,7 +316,7 @@ These are the intended rules, inferred from the code structure:
 |---|---|
 | `security` → `credential.repository.ApiKeyRepository`, `credential.service.ApiKeyHasher` | `ApiKeyAuthenticationProvider` |
 | `subscription` → `tenancy.domain.CustomerStatus` | `SubscriptionService.subscribe` |
-| `CatalogFacade.getApiProduct` returns `catalog.api.ApiProductResponse` (an HTTP DTO, not a view) | `CatalogFacade` |
+| `gateway` → `tenancy.domain.CustomerStatus` | `MeteringService.authorize`. Same root cause: `CustomerView.status` exposes the domain enum |
 | `CustomerController.getAll` returns `List<Customer>` (an entity) | `CustomerController` |
 
 ## 6. Entry Points
@@ -333,7 +342,7 @@ There are no CLI runners (`CommandLineRunner`), schedulers, message listeners or
 | `SubscriptionControllerIntegrationTest` | Subscribe, active, cancel, error cases |
 | [`SubscriptionConcurrencyIntegrationTest`](../../src/test/java/com/meterflow/subscription/SubscriptionConcurrencyIntegrationTest.java) | Two concurrent `subscribe` calls: exactly one succeeds and one gets `SUBSCRIPTION_ALREADY_ACTIVE` |
 | [`ApiKeySecurityIntegrationTest`](../../src/test/java/com/meterflow/security/ApiKeySecurityIntegrationTest.java) | 401 when the key is missing, invalid or revoked. Success with an active key. No context leak between requests |
-| `MeteringControllerIntegrationTest` | `/v1/usage` success and 401 without a key |
+| [`MeteringControllerIntegrationTest`](../../src/test/java/com/meterflow/gateway/MeteringControllerIntegrationTest.java) | 11 tests: success with full response and credit cost, code normalization, suspended customer (403), unknown product (404), inactive product (403), no subscription and cancelled subscription (403), missing and disallowed entitlement (403), deactivated plan still allowed (200), missing key (401) |
 | `GlobalExceptionHandlerIntegrationTest` | **Empty.** It has no test methods. The error shape is covered indirectly by `$.errorCode` assertions in the other tests |
 | `DataPlaneTestController`, `AdminSecurityTestController` | Test-only controllers exposing `GET /v1/ping` (returns `{"customerId": ...}`) and `GET /admin/ping` (returns `"admin"`). They are **not** part of the production build |
 
@@ -343,7 +352,6 @@ There are no CLI runners (`CommandLineRunner`), schedulers, message listeners or
 |---|---|
 | `credential.CredentialFacade` | Empty class, not a bean |
 | `credential.api.CreateApiKeyRequest` | Empty class, unused (the create endpoint takes no body) |
-| `ErrorCode.API_PRODUCT_NOT_FOUND` | Duplicates `PRODUCT_NOT_FOUND`. Unused |
 | `ErrorCode.CONCURRENT_MODIFICATION` | Defined but never thrown or mapped |
 | `ApiKeyRepository.findByCustomerIdAndStatus` | Unused |
 | `Customer.rename/suspend/activate`, `Subscription.expire`, `ApiProduct.rename` | Domain methods with no caller |

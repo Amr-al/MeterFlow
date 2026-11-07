@@ -145,7 +145,7 @@ stateDiagram-v2
 | Data | Protection |
 |---|---|
 | API keys | Only the SHA-256 hash and a 16-char prefix are persisted. The raw key is returned once |
-| DB credentials | `${DB_PASSWORD}` environment variable. Not committed |
+| DB credentials | `DB_PASSWORD` environment variable. The `local` and `test` profiles fall back to a local-development default; the base configuration has no default and there is no production profile. See [Deployment § 4.3](../architecture/deployment-architecture.md#43-production-credentials) |
 | Error responses | `500`s hide internal details and return a `correlationId` |
 | Transport | No TLS configuration in the app **[Unverified: expected to be terminated upstream]** |
 | PII | Customer `name` only. The `email` column was dropped in `V3` |
@@ -159,7 +159,7 @@ stateDiagram-v2
 | Key enumeration through error differences | Identical "Invalid API key" message. 404 (not 403) for revoking another customer's key | Low |
 | Timing side channel on lookup | Comparison happens on the hash via a DB index, not on the raw key | Low |
 | Unauthenticated admin access | None | **High** until M10 |
-| Suspended customer continues using the API | None. The provider does not check customer status | Medium |
+| Suspended customer continues using the API | `MeteringService.authorize` rejects a `SUSPENDED` customer with `403 CUSTOMER_SUSPENDED` (M3, tested). The authentication provider itself still checks only the key status, so a suspended customer's key still authenticates | Low |
 | Authentication DoS (flood of invalid keys, one DB query each) | None (no rate limiting) | Medium. **[Roadmap]** rate limiting in M7–M9 |
 | Session fixation / CSRF on the data plane | Stateless, CSRF not applicable to header-based auth | Negligible |
 | Thread-local context leak | `finally clearContext()` | Negligible (tested) |
@@ -168,7 +168,7 @@ stateDiagram-v2
 
 ## 9. Recommendations
 
-1. Check `customer.status == ACTIVE` on the data plane, either in the provider or in `MeteringService` (M3).
+1. ~~Check `customer.status == ACTIVE` on the data plane~~. Done in M3 inside `MeteringService.authorize`. Any future `/v1/**` endpoint must reuse that authorization, because the provider does not check customer status.
 2. Move key verification behind `CredentialFacade` (for example `Optional<Long> authenticate(String rawKey)`), so `security` stops depending on `credential` internals.
 3. Return a `ProblemDetail` body from the entry point, to keep one error contract.
 4. Add per-IP or per-prefix throttling of failed authentications.

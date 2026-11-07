@@ -71,7 +71,8 @@ Candidates, if latency becomes a concern:
 | Data | Read frequency | Change frequency | Notes |
 |---|---|---|---|
 | API key hash → (customerId, status) | Every `/v1` request | Rare (create or revoke) | Must be invalidated on revoke. A short TTL is acceptable if a revocation delay is acceptable |
-| Plan and entitlement by (planId, productId) | Every `/v1` request (after M3) | Rare | Invalidate on admin updates |
+| Entitlement by (planId, productId) | Every `/v1/usage` request | Rare | Invalidate on admin updates |
+| Customer status, active subscription | Every `/v1/usage` request | Rare | Must be invalidated on suspend, subscribe and cancel, or a stale entry would let a suspended or cancelled customer through |
 | API product by code | Every `/v1` request | Rare | |
 
 In a multi-instance deployment, a local cache gives each instance its own view. Invalidation then needs a shared cache or a pub/sub signal.
@@ -95,15 +96,16 @@ In a multi-instance deployment, a local cache gives each instance its own view. 
 flowchart LR
     A["Request"] --> B["SHA-256 of key<br/>CPU, microseconds"]
     B --> C["SELECT api_key by key_hash<br/>DB round trip 1"]
-    C --> D["SELECT api_product by code<br/>DB round trip 2"]
-    D --> E["Response"]
-    D -. "M3 adds" .-> F["SELECT customer"]
-    D -. "M3 adds" .-> G["SELECT active subscription"]
-    D -. "M3 adds" .-> H["SELECT plan_entitlement"]
-    D -. "M4-M5 add" .-> I["atomic debit + ledger INSERT + usage counter"]
+    C --> T["BEGIN readOnly<br/>MeteringService.authorize"]
+    T --> F["SELECT customer by id<br/>round trip 2"]
+    F --> D["SELECT api_product by code<br/>round trip 3"]
+    D --> G["SELECT subscription by customer_id, status<br/>round trip 4"]
+    G --> H["SELECT plan_entitlement by plan_id, api_product_id<br/>round trip 5"]
+    H --> E["COMMIT, Response"]
+    H -. "M4-M5 add" .-> I["atomic debit + ledger INSERT + usage counter"]
 ```
 
-**Explanation:** Today the hot path costs two indexed point lookups. Each of those runs in its own short transaction, because `MeteringService.process` is not `@Transactional`. Completing M3 adds roughly three more point lookups. Running them in **one** `readOnly` transaction holds a single connection and gives a consistent view. With M4–M5 the path becomes write-heavy, and that is where contention on per-customer rows will dominate.
+**Explanation:** With M3 complete, an authorized call costs five indexed point lookups and no writes: one for authentication, then four inside a single `readOnly` transaction (`MeteringService.authorize`) that holds one connection and gives a consistent view. Every lookup uses a primary key or a unique/composite index. The entitlement lookup uses FK IDs only, so it needs no join with `plan` or `api_product`, and `EntitlementView` reads only scalar fields, so the `LAZY` associations are never loaded. A rejected call stops at the first failing check, so it costs fewer lookups. With M4–M5 the path becomes write-heavy, and that is where contention on per-customer rows will dominate.
 
 ## 7. Scalability
 
@@ -119,7 +121,7 @@ flowchart LR
 | # | Bottleneck | Recommendation | Milestone fit |
 |---|---|---|---|
 | 1 | One DB lookup per request just for authentication | Cache key → customer with invalidation on revoke | Any |
-| 2 | Several sequential lookups per metered request (after M3) | One `readOnly` transaction, possibly one joined query for subscription + entitlement | M3 |
+| 2 | Four sequential lookups per metered request | ✅ One `readOnly` transaction (done in M3). Possible next step: one joined query for subscription + entitlement, or caching (§ 4) | Any |
 | 3 | Contention on wallet or quota rows | Atomic conditional updates, not optimistic locking | **[Roadmap]** M4/M5 |
 | 4 | High-volume usage inserts with `IDENTITY` | `SEQUENCE` with `allocationSize` plus JDBC batching, or asynchronous event persistence | **[Roadmap]** M7–M9 |
 | 5 | Rate limiting per minute | In-memory token bucket (single instance) or Redis (multi-instance) | **[Roadmap]** M7–M9 |

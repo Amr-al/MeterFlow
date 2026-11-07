@@ -297,10 +297,11 @@ sequenceDiagram
     participant MC as MeteringController
     participant CC as CurrentCustomer
     participant MS as MeteringService
+    participant TF as CustomerFacade
     participant KF as CatalogFacade
-    participant KS as CatalogService.getApiProduct
+    participant SF as SubscriptionFacade
 
-    CS->>F: POST /v1/usage, X-API-Key, productCode SMS
+    CS->>F: POST /v1/usage, X-API-Key, productCode sms
     F->>P: authenticate
     P->>DB: SELECT api_key WHERE key_hash = sha256
     alt invalid or revoked
@@ -314,19 +315,36 @@ sequenceDiagram
         end
         MC->>CC: getCustomerId()
         CC-->>MC: 42
-        MC->>MS: process(42, SMS)
-        MS->>KF: getApiProduct(SMS)
-        KF->>KS: getApiProduct(SMS), readOnly TX
-        KS->>DB: SELECT api_product WHERE code = SMS
-        alt not found
-            KS-->>CS: 404 PRODUCT_NOT_FOUND
-        else found
-            MS-->>MC: MeteredResponse(42, SMS)
-            MC-->>CS: 200 customerId 42, productCode SMS
+        MC->>MS: authorize(42, sms)
+        Note over MS: BEGIN readOnly TX, facades join it
+        MS->>TF: getCustomer(42)
+        TF->>DB: SELECT customer WHERE id = 42
+        alt status SUSPENDED
+            MS-->>CS: 403 CUSTOMER_SUSPENDED
         end
+        MS->>KF: getApiProduct(sms)
+        KF->>DB: SELECT api_product WHERE code = SMS
+        alt not found
+            MS-->>CS: 404 PRODUCT_NOT_FOUND
+        else active = false
+            MS-->>CS: 403 PRODUCT_INACTIVE
+        end
+        MS->>SF: findActiveSubscription(42)
+        SF->>DB: SELECT subscription WHERE customer_id = 42 AND status = ACTIVE
+        alt empty
+            MS-->>CS: 403 NO_ACTIVE_SUBSCRIPTION
+        end
+        MS->>KF: findEntitlement(planId 3, productId 7)
+        KF->>DB: SELECT plan_entitlement WHERE plan_id = 3 AND api_product_id = 7
+        alt empty or allowed = false
+            MS-->>CS: 403 PRODUCT_NOT_ENTITLED
+        end
+        MS-->>MC: UsageAuthorization(42, sub 12, plan 3, product 7, SMS, 1500)
+        Note over MS: COMMIT readOnly TX
+        MC->>MC: MeteredResponse.from(authorization)
+        MC-->>CS: 200 customerId 42, productCode SMS, subscriptionId 12, planId 3, creditCost 1500
         F->>F: finally clearContext()
     end
-    Note over MS: M3 TODO: customer status, product active, subscription, entitlement, creditCost
 ```
 
-**Explanation:** This is the full data-plane path as implemented. It costs two indexed queries and has no writes. The note marks where the remaining M3 checks will go, inside `MeteringService.process`.
+**Explanation:** This is the complete M3 data-plane path. An authorized call costs five indexed queries (one for authentication, four for authorization) and performs **no writes**. Each rejection is a `MeterFlowException` that `GlobalExceptionHandler` turns into a `ProblemDetail` with the `errorCode` shown. The arrows from `MeteringService` straight to the client are a shorthand for that path. `apiProductId` (7) travels in `UsageAuthorization` but is dropped from the HTTP response. Nothing is debited or recorded yet (**[Roadmap]** M4).

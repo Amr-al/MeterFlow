@@ -6,11 +6,11 @@ MeterFlow is a backend platform for **metering and monetizing APIs**. Operators 
 - grant plans access to products, with a per-call credit cost,
 - onboard customers and subscribe them to a plan,
 - issue API keys,
-- authenticate customer traffic on a data-plane endpoint that will meter usage.
+- authenticate customer traffic on a data-plane endpoint and authorize each call against the customer's subscription and plan.
 
 The service is a single **Spring Boot 4 modular monolith** backed by **PostgreSQL**.
 
-> **Documentation status.** This documentation describes the code on branch `feature/m3-metering-flow`, including uncommitted working-tree changes, as of 2026-11-06. Statements are taken from the source code. Anything that could not be verified from the code is marked **[Unverified]**, and anything taken from the project roadmap rather than the code is marked **[Roadmap]**.
+> **Documentation status.** This documentation describes the code on branch `feature/m3-metering-flow`, as of 2026-11-07 (M3 complete). Statements are taken from the source code. Anything that could not be verified from the code is marked **[Unverified]**, and anything taken from the project roadmap rather than the code is marked **[Roadmap]**.
 
 ---
 
@@ -40,7 +40,7 @@ The service is a single **Spring Boot 4 modular monolith** backed by **PostgreSQ
 | Subscription | Read or cancel the active subscription | `com.meterflow.subscription` |
 | Credentials | Issue API keys. The raw key is shown once and only a SHA-256 hash is stored. Keys can be listed and revoked | `com.meterflow.credential` |
 | Security | Stateless API-key authentication (`X-API-Key`) for `/v1/**` | `com.meterflow.security` |
-| Data plane | `POST /v1/usage`: resolves the customer from the API key and validates that the product exists (**metering is still in progress**) | `com.meterflow.gateway` |
+| Data plane | `POST /v1/usage`: resolves the customer from the API key, then checks customer status, product, active subscription and plan entitlement, and returns the credit cost of the call. **Usage is authorized but not yet charged or recorded** (M4+) | `com.meterflow.gateway` |
 | Errors | Uniform RFC 7807 `ProblemDetail` responses with a machine-readable `errorCode` | `com.meterflow.common.error` |
 | Ops | Actuator `health` and `info` endpoints | Spring Boot Actuator |
 
@@ -53,16 +53,16 @@ The service is a single **Spring Boot 4 modular monolith** backed by **PostgreSQ
 | M0 | Foundation (Boot, PostgreSQL, Flyway, profiles, error handling, integration tests, `Clock`) | Completed |
 | M1 | Tenancy & Catalog (customers, products, plans, entitlements, subscriptions) | Completed |
 | M2 | API Keys & Security | Implemented |
-| **M3** | **Metering Flow**: usage API, customer resolution, product, subscription and entitlement validation, credit-cost resolution | **In progress** |
+| **M3** | **Metering Flow**: usage API, customer resolution, product, subscription and entitlement validation, credit-cost resolution | **Completed** |
 | M4 | Wallet & Ledger (atomic debit, ledger entries) | Planned |
 | M5 | Monthly Quota (per-customer billing periods) | Planned |
 | M6 | Idempotency keys | Planned |
 | M7–M9 | Rate limiting, usage events, transactional outbox, Kafka (provisional) | To be confirmed |
 | M10 | User identity & admin security (`app_user`) | Future |
 
-**What M3 has today:** the usage endpoint, customer resolution from the API key, and a check that the product **exists**.
+**What M3 delivers:** `POST /v1/usage` resolves the customer from the API key and authorizes the call. It checks that the customer is `ACTIVE`, the product exists and is active, the customer has an `ACTIVE` subscription, and the subscription's plan allows the product. It then returns the entitlement's credit cost. See [Business Logic § Metering](technical-design/business-logic.md#5-metering-gateway--m3).
 
-**What M3 still needs:** checks for product `active`, customer `ACTIVE`, an active subscription and an allowed entitlement, plus credit-cost resolution. See [Business Logic § Metering](technical-design/business-logic.md#5-metering-gateway--m3-in-progress).
+**What M3 deliberately does not do yet:** debit a wallet (M4), persist usage records (M4+), deduplicate retries (M6), enforce monthly quota or billing-period expiry (M5), or rate-limit (M7–M9, provisional). A `200` from `/v1/usage` today means "authorized, and this is what it would cost"; nothing is charged or stored.
 
 ## Technology Stack
 
@@ -93,7 +93,7 @@ The full rationale for each technology is in [System Overview § Technology Stac
 | PostgreSQL client tools | `pg_isready` and `psql` are used by `scripts/dev-up.sh` |
 | Database role | `meterflow` |
 | Databases | `meterflow` (local profile) and `meterflow_test` (test profile) |
-| Environment variable | `DB_PASSWORD`: the password of the `meterflow` role |
+| Environment variable | `DB_PASSWORD`: the password of the `meterflow` role. Optional for the `local` and `test` profiles, which fall back to a local-development default defined in their profile files. See [Deployment Architecture § Configuration](architecture/deployment-architecture.md#4-environment-configuration) |
 
 ## Setup and Installation
 
@@ -104,6 +104,7 @@ createdb -U postgres -O meterflow meterflow
 createdb -U postgres -O meterflow meterflow_test
 
 # 2. Export the password used by both Spring profiles
+#    (optional if your local role uses the default from application-local.yml / application-test.yml)
 export DB_PASSWORD='<password>'
 
 # 3. Build (runs the tests against meterflow_test)
@@ -123,7 +124,7 @@ export DB_PASSWORD='<password>'
 
 [`scripts/dev-up.sh`](../scripts/dev-up.sh) does the following:
 
-1. Fails fast if `DB_PASSWORD` is not set.
+1. Uses `DB_PASSWORD` if set, otherwise the local-development default, and exports it as `PGPASSWORD`. `JAVA_HOME` comes from `METERFLOW_JAVA_HOME`, defaulting to `/usr/lib/jvm/java-17-openjdk-amd64`.
 2. Checks PostgreSQL with `pg_isready`.
 3. Verifies that both `meterflow` and `meterflow_test` exist.
 4. Runs `./mvnw spring-boot:run -Dspring-boot.run.profiles=local`.
@@ -134,7 +135,7 @@ export DB_PASSWORD='<password>'
 DB_PASSWORD='<password>' ./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-> A Spring profile is **required**. The base [`application.yml`](../src/main/resources/application.yml) has no datasource, so without the `local` or `test` profile the application fails to start.
+> A Spring profile is **required**. The base [`application.yml`](../src/main/resources/application.yml) has no datasource, so without the `local` or `test` profile the application fails to start (`Failed to determine a suitable driver class`). There is no production profile in the repository; see [Deployment Architecture § Production credentials](architecture/deployment-architecture.md#43-production-credentials).
 
 ### Verify that it runs
 
@@ -156,7 +157,7 @@ DB_PASSWORD='<password>' ./mvnw test
 - Tests use the `test` profile and the **real** `meterflow_test` database. There are no Testcontainers and no H2.
 - The base class [`IntegrationTest`](../src/test/java/com/meterflow/support/IntegrationTest.java) is `@SpringBootTest @AutoConfigureMockMvc @ActiveProfiles("test")`.
 - Each test class cleans its own tables with `deleteAllInBatch()`. Flyway `clean` is disabled.
-- The last recorded run (`target/surefire-reports`) shows 70 tests with 0 failures. Test classes cover the catalog, plans, API keys, subscriptions (including a concurrency test), security and metering.
+- The last run (2026-11-07, JDK 17) executed 79 tests: 79 passed, 0 failed, 0 skipped. Test classes cover the catalog, plans, API keys, subscriptions (including a concurrency test), security, and every allow/deny path of the metering flow (11 tests in `MeteringControllerIntegrationTest`).
 
 ## Documentation Map
 
