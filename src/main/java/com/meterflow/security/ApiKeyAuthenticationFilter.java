@@ -44,8 +44,7 @@ public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
         }
 
         try {
-            Authentication authentication =
-                    authenticationManager.authenticate(
+            Authentication authentication = authenticationManager.authenticate(
                             ApiKeyAuthenticationToken.unauthenticated(rawApiKey)
                     );
 

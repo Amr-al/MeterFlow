@@ -1,0 +1,60 @@
+flowchart LR
+    subgraph tenancy["tenancy"]
+        CustomerController --> CustomerService
+        CustomerFacade --> CustomerService
+        CustomerService --> CustomerRepository
+    end
+
+    subgraph catalog["catalog"]
+        CatalogAdminController --> CatalogService
+        CatalogFacade --> CatalogService
+        CatalogService --> PlanRepository
+        CatalogService --> ApiProductRepository
+        CatalogService --> PlanEntitlementRepository
+    end
+
+    subgraph subscription["subscription"]
+        SubscriptionController --> SubscriptionService
+        SubscriptionFacade --> SubscriptionService
+        SubscriptionService --> SubscriptionRepository
+    end
+
+    subgraph credential["credential"]
+        ApiKeyAdminController --> ApiKeyService
+        ApiKeyService --> ApiKeyRepository
+        ApiKeyService --> ApiKeyGenerator
+        ApiKeyService --> ApiKeyHasher
+    end
+
+    subgraph security["security"]
+        SecurityConfig -->|creates| ApiKeyAuthenticationFilter
+        ApiKeyAuthenticationFilter -->|via ProviderManager| ApiKeyAuthenticationProvider
+        CurrentCustomer
+    end
+
+    subgraph gateway["gateway"]
+        MeteringController -->|authorize| MeteringService
+        MeteringService -->|returns| UsageAuthorization
+        MeteringController -->|from| MeteredResponse
+    end
+
+    subgraph shared["config + common.error"]
+        Clock["Clock (TimeConfig)"]
+        GlobalExceptionHandler
+    end
+
+    SubscriptionService -->|getCustomer| CustomerFacade
+    SubscriptionService -->|getPlan| CatalogFacade
+    ApiKeyService -->|getCustomer| CustomerFacade
+    MeteringService -->|getCustomer| CustomerFacade
+    MeteringService -->|getApiProduct, findEntitlement| CatalogFacade
+    MeteringService -->|findActiveSubscription| SubscriptionFacade
+    MeteringController -->|getCustomerId| CurrentCustomer
+    ApiKeyAuthenticationProvider -.->|direct, bypasses facade| ApiKeyRepository
+    ApiKeyAuthenticationProvider -.->|direct, bypasses facade| ApiKeyHasher
+
+    CustomerService --> Clock
+    CatalogService --> Clock
+    SubscriptionService --> Clock
+    ApiKeyService --> Clock
+    GlobalExceptionHandler --> Clock

@@ -1,0 +1,23 @@
+flowchart LR
+    subgraph devhost["Developer host (the only documented environment)"]
+        direction TB
+        script["scripts/dev-up.sh"]
+        subgraph jvm["JVM 17 — ./mvnw spring-boot:run, profile local"]
+            app["MeterFlow<br/>embedded Tomcat :8080"]
+            hikari["HikariCP pool<br/>(Spring Boot defaults)"]
+        end
+        subgraph pg["PostgreSQL localhost:5432"]
+            dbmain[("meterflow")]
+            dbtest[("meterflow_test")]
+        end
+        mvntest["./mvnw test<br/>profile test"]
+        postman["Postman<br/>MeterFlow.postman_collection.json"]
+    end
+
+    script -->|1. pg_isready| pg
+    script -->|2. psql: both databases exist?| pg
+    script -->|3. exec| jvm
+    app --> hikari
+    hikari -->|JDBC user meterflow, password from DB_PASSWORD| dbmain
+    mvntest -->|JDBC| dbtest
+    postman -->|HTTP baseUrl localhost:8080| app

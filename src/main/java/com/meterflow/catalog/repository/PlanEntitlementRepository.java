@@ -11,4 +11,8 @@ public interface PlanEntitlementRepository
     Optional<PlanEntitlement> findByPlanCodeAndApiProductCode(
             String planCode,
             String productCode);
+
+    Optional<PlanEntitlement> findByPlanIdAndApiProductId(
+            Long planId,
+            Long apiProductId);
 }
